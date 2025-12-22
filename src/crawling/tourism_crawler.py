@@ -25,7 +25,7 @@ driver = webdriver.Chrome()
 
 for url in urls:
     driver.get(url)
-    time.sleep(5)  # 페이지가 완전히 로드될 때까지 대기
+    time.sleep(5) 
 
     # 페이지 소스 가져오기
     soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -37,7 +37,7 @@ for url in urls:
         # 상세정보
         details = soup.select_one("div.inr_wrap p").get_text(strip=True) if soup.select_one("div.inr_wrap p") else "N/A"
 
-        # 상세주소: area_txtView 내의 모든 <span> 요소를 찾아 연결
+        # 상세주소
         address = " ".join([span.get_text(strip=True) for span in soup.select("div.area_txtView.bottom span")])
 
         # 해시태그
