@@ -1,17 +1,3 @@
-"""
-관광지 상세 설명에서 키워드를 추출하여 tokens 컬럼을 생성하는 전처리 스크립트.
-
-입력
-- data/tourism_boryeong_raw.xlsx
-  (컬럼: name, detailed_info, address, tags ...)
-
-추가 파일
-- resources/stopwords-ko.txt  : 한국어 불용어 리스트 (줄바꿈 기준)
-
-출력
-- data/tourism_boryeong_tokens.csv
-"""
-
 from pathlib import Path
 
 import pandas as pd
@@ -117,15 +103,13 @@ def load_stopwords() -> set[str]:
     return set(DEFAULT_STOPWORDS + extra)
 
 
-def build_custom_keywords(df: pd.DataFrame) -> list[str]:
-    """관광지 이름 컬럼(name)을 사용자 정의 키워드로 사용."""
+def build_custom_keywords(df: pd.DataFrame) -> list[str]: # 관광지 이름 컬럼(name)을 사용자 정의 키워드로 사용
     return df["name"].dropna().astype(str).tolist()
 
 
 def preprocess_text(
     text: str, custom_keywords: list[str], stopwords: set[str], okt: Okt
-) -> list[str]:
-    """관광지 설명에서 키워드(관광지명 + 명사)를 추출."""
+) -> list[str]: # 관광지 설명에서 키워드(관광지명 + 명사)를 추출
     if pd.isna(text):
         return []
 
@@ -146,7 +130,7 @@ def preprocess_text(
 
     return extracted + filtered
 
-
+# 토큰화
 def main() -> None:
     df = pd.read_excel(RAW_DATA_PATH)
 
