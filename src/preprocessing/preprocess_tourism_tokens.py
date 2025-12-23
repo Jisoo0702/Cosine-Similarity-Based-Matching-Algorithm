@@ -91,9 +91,8 @@ DEFAULT_STOPWORDS = [
     "위해",
 ]
 
-
+# 불용어 처리
 def load_stopwords() -> set[str]:
-    """기본 불용어 + 파일에서 읽은 불용어를 합쳐서 반환."""
     extra = []
     if STOPWORD_PATH.exists():
         with STOPWORD_PATH.open("r", encoding="utf-8") as f:
