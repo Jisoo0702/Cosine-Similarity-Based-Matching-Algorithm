@@ -1,23 +1,27 @@
 from pathlib import Path
+import ast
 
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import normalize
 
+from gensim import corpora
+from gensim.models import LdaModel
 
-RAW_DATA_PATH = Path("data/influencer_tokens.csv")  # 전처리(토큰화) 결과
-OUTPUT_PATH = Path("data/influencer_ctfidf_summary.csv")
+
+TOKENS_DATA_PATH = Path("data/influencer_tokens.csv")  # influencer_preprocess_tokens.py 결과
+OUTPUT_TOPICS_PATH = Path("data/modeling/influencer_topics.csv")
+OUTPUT_DOC_TOPICS_PATH = Path("data/modeling/influencer_doc_topics.csv")
 
 
-# 기본 불용어 + 제거/대체 규칙에 자주 등장하는 단어
+# 단어 제거/대체 규칙
 REMOVE_WORDS = [
     "링드", "마켓", "스타", "모든", "채널", "포스", "스린", "만행", "에서", "치기", "철행", "상촬", "진촬", "인트", "주도",
-    "마무리", "목차", "코리", "잔샘", "으로", "안녕", "시행", "유카", "병맛", "베스트",
-    "봉선", "쿠카", "습니다", "손질", "브레", "상필", "활동", "선물", "산시", "대표", "무장애", "도보", "접근", "명소",
-    "복화술", "별별", "연소", "독기", "주소", "클릭", "공복", "브랜드", "안경", "카린", "플루", "프라", "마카", "파타",
-    "인스타", "쇼츠", "볼품", "잔비", "폴킴", "우러스", "불능", "주차장", "상대", "언트", "케릭", "무삭", "뿡뿡", "대회",
-    "미니", "행유", "병맛", "활용",
+    "마무리", "목차", "코리", "잔샘", "으로", "안녕", "시행", "유카", "병맛", "베스트", "봉선", "쿠카", "습니다", "손질",
+    "브레", "상필", "활동", "선물", "산시", "대표", "무장애", "도보", "접근", "명소", "복화술", "별별", "연소", "독기",
+    "주소", "클릭", "공복", "브랜드", "안경", "카린", "플루", "프라", "마카", "파타", "인스타", "쇼츠", "볼품", "잔비",
+    "폴킴", "우러스", "불능", "주차장", "상대", "언트", "케릭", "무삭", "뿡뿡", "대회", "미니", "행유", "활용",
 ]
 
 REPLACE_WORDS = {
@@ -35,125 +39,164 @@ REPLACE_WORDS = {
     "름밤": "여름밤",
 }
 
-# 불용어 처리
 STOP_KEYWORDS = ["사우스", "나크", "시작"]
 
 
-def _ensure_tokens_list(x) -> list[str]:
-    """
-    tokens 컬럼이 리스트로 들어오는 걸 전제로 하지만,
-    csv 저장 과정에서 문자열로 들어오는 경우를 대비해 간단히 처리.
-    """
-    if isinstance(x, list):
-        return x
-    if pd.isna(x):
-        return []
-    s = str(x).strip()
-
-    # 예: "['a', 'b']" 형태로 들어온 경우(완벽 파싱이 필요하면 ast.literal_eval 추천)
-    if s.startswith("[") and s.endswith("]"):
-        s = s.strip("[]")
-        parts = [p.strip().strip("'").strip('"') for p in s.split(",")]
-        return [p for p in parts if p]
-
-    # 예: "a b c" 형태
-    return [t for t in s.split() if t]
-
-
-def preprocess_tokens(tokens: list[str]) -> list[str]:
+# 토큰 정리(제거/대체/길이)
+def clean_tokens(tokens: list[str]) -> list[str]:
     cleaned = []
     for t in tokens:
-        if not t or len(t) <= 1:
-            continue
+        t = REPLACE_WORDS.get(t, t)
         if t in REMOVE_WORDS:
             continue
-        t = REPLACE_WORDS.get(t, t)
+        if len(t) <= 1:
+            continue
         cleaned.append(t)
     return cleaned
 
 
-def extract_top_keywords(c_tfidf_matrix, vectorizer, n_top_keywords: int = 10) -> list[list[str]]:
-    feature_names = vectorizer.get_feature_names_out()
-    keywords_per_cluster = []
+# TF-IDF + 클러스터링
+def build_clusters(df: pd.DataFrame, num_clusters: int = 5, max_features: int = 1000) -> pd.DataFrame:
+    df = df.copy()
+    df["tokens"] = df["tokens"].apply(clean_tokens)
+    df["joined_tokens"] = df["tokens"].apply(lambda x: " ".join(x))
 
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    tfidf_matrix = vectorizer.fit_transform(df["joined_tokens"])
+
+    # 문서 수가 너무 적으면 클러스터 수 축소
+    n = min(num_clusters, len(df))
+    if n < 2:
+        df["cluster"] = 0
+        return df
+
+    kmeans = KMeans(n_clusters=n, random_state=42)
+    df["cluster"] = kmeans.fit_predict(tfidf_matrix)
+
+    return df
+
+
+# C-TF-IDF
+def compute_c_tfidf(df: pd.DataFrame, max_features: int = 1000):
+    cluster_texts = df.groupby("cluster")["joined_tokens"].apply(lambda x: " ".join(x))
+
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    cluster_tfidf_matrix = vectorizer.fit_transform(cluster_texts)
+
+    c_tfidf_matrix = normalize(cluster_tfidf_matrix, norm="l1", axis=1)
+    feature_names = vectorizer.get_feature_names_out()
+
+    return c_tfidf_matrix, feature_names
+
+
+# 클러스터별 상위 키워드 추출
+def extract_top_keywords(c_tfidf_matrix, feature_names, n_top_keywords: int = 10) -> list[list[str]]:
+    top_keywords = []
     for cluster_idx in range(c_tfidf_matrix.shape[0]):
         row = c_tfidf_matrix[cluster_idx].toarray()[0]
-        top_idx = row.argsort()[-n_top_keywords:][::-1]
-        keywords_per_cluster.append([feature_names[i] for i in top_idx])
-
-    return keywords_per_cluster
-
-
-def process_channel(channel_name: str, channel_docs_tokens: list[list[str]]) -> dict:
-    df_ch = pd.DataFrame({"tokens": channel_docs_tokens})
-    df_ch["tokens"] = df_ch["tokens"].apply(preprocess_tokens)
-    df_ch["joined_tokens"] = df_ch["tokens"].apply(lambda x: " ".join(x))
-
-    # 문서 수가 너무 적으면 클러스터링 스킵
-    num_docs = len(df_ch)
-    num_clusters = min(5, num_docs)
-    if num_clusters < 2:
-        return {
-            "channel": channel_name,
-            "best_cluster": None,
-            "top_keywords": "데이터 부족",
-            "num_docs": num_docs,
-        }
-
-    vectorizer = TfidfVectorizer(max_features=1000)
-    tfidf_matrix = vectorizer.fit_transform(df_ch["joined_tokens"])
-
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init="auto")
-    df_ch["cluster"] = kmeans.fit_predict(tfidf_matrix)
-
-    # C-TF-IDF
-    cluster_texts = df_ch.groupby("cluster")["joined_tokens"].apply(lambda x: " ".join(x))
-    cluster_tfidf = vectorizer.fit_transform(cluster_texts)
-    c_tfidf = normalize(cluster_tfidf, norm="l1", axis=1)
-
-    top_keywords = extract_top_keywords(c_tfidf, vectorizer, n_top_keywords=10)
-
-    # 불필요 키워드 제거 + 중복 제거
-    cleaned_keywords = []
-    for kws in top_keywords:
-        uniq = list(dict.fromkeys(kws))  # 순서 유지 중복 제거
-        uniq = [w for w in uniq if w not in STOP_KEYWORDS]
-        cleaned_keywords.append(uniq)
-
-    # 가장 관련 있는 클러스터: 문서 수가 가장 많은 클러스터
-    best_cluster = df_ch["cluster"].value_counts().idxmax()
-    best_keywords = cleaned_keywords[best_cluster] if best_cluster < len(cleaned_keywords) else []
-
-    return {
-        "channel": channel_name,
-        "best_cluster": int(best_cluster),
-        "top_keywords": ", ".join(best_keywords),
-        "num_docs": num_docs,
-    }
+        top_indices = row.argsort()[-n_top_keywords:][::-1]
+        kws = [feature_names[i] for i in top_indices]
+        kws = [k for k in dict.fromkeys(kws) if k not in STOP_KEYWORDS]  # 중복 제거 + 불필요 단어 제거
+        top_keywords.append(kws)
+    return top_keywords
 
 
-# 토큰화
+# LDA 토픽 모델링
+def train_lda(df: pd.DataFrame, num_topics: int = 5, passes: int = 10):
+    grouped_tokens = df.groupby("cluster")["tokens"].sum().reset_index()
+
+    dictionary = corpora.Dictionary(grouped_tokens["tokens"])
+    corpus = [dictionary.doc2bow(text) for text in grouped_tokens["tokens"]]
+
+    lda_model = LdaModel(
+        corpus=corpus,
+        num_topics=num_topics,
+        id2word=dictionary,
+        passes=passes,
+        random_state=42,
+    )
+
+    return lda_model, corpus, dictionary, grouped_tokens
+
+
+# 문서별 토픽 확률 + 대표 토픽 + 키워드
+def get_doc_topics(lda_model: LdaModel, corpus, num_topics: int):
+    dominant_topics = []
+    topic_probs_all = []
+    keywords_all = []
+
+    for doc in corpus:
+        topic_probs = lda_model.get_document_topics(doc, minimum_probability=0.0)
+        topic_probs_sorted = [prob for _, prob in sorted(topic_probs, key=lambda x: x[0])]
+
+        dominant = max(topic_probs, key=lambda x: x[1])[0]
+        dominant_topics.append(dominant)
+        topic_probs_all.append(topic_probs_sorted)
+
+        keywords = [w for w, _ in lda_model.show_topic(dominant, topn=10)]
+        keywords_all.append(keywords)
+
+    topics_df = pd.DataFrame(topic_probs_all, columns=[f"Topic_{i}" for i in range(num_topics)])
+    topics_df["dominant_topic"] = dominant_topics
+    topics_df["keywords"] = keywords_all
+
+    return topics_df
+
+
+# 저장
+def save_results(lda_model: LdaModel, num_topics: int, topics_df: pd.DataFrame):
+    OUTPUT_TOPICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    topic_rows = []
+    for topic_id in range(num_topics):
+        words = [w for w, _ in lda_model.show_topic(topic_id, topn=10)]
+        topic_rows.append({"topic_id": topic_id, "keywords": ", ".join(words)})
+
+    pd.DataFrame(topic_rows).to_csv(OUTPUT_TOPICS_PATH, index=False, encoding="utf-8-sig")
+    topics_df.to_csv(OUTPUT_DOC_TOPICS_PATH, index=False, encoding="utf-8-sig")
+
+    print(f"토픽 키워드 저장 완료: {OUTPUT_TOPICS_PATH}")
+    print(f"토픽 확률/대표 토픽 저장 완료: {OUTPUT_DOC_TOPICS_PATH}")
+
+
+# 실행
 def main() -> None:
-    df = pd.read_csv(RAW_DATA_PATH, encoding="utf-8-sig")
+    df = pd.read_csv(TOKENS_DATA_PATH, encoding="utf-8-sig")
 
-    # 기대 컬럼: channel, tokens
-    # (네가 전처리에서 저장한 컬럼명이 다르면 여기만 바꾸면 됨)
-    if "channel" not in df.columns or "tokens" not in df.columns:
-        raise ValueError("CSV에 'channel'과 'tokens' 컬럼이 필요합니다.")
+    # tokens가 문자열로 저장되어 있을 경우(list로 복원)
+    if isinstance(df["tokens"].iloc[0], str):
+        df["tokens"] = df["tokens"].apply(ast.literal_eval)
 
-    df["tokens"] = df["tokens"].apply(_ensure_tokens_list)
+    # (선택) 채널명이 있으면 채널 단위로 합쳐서 1채널=1문서로 만들기
+    if "channel" in df.columns:
+        df = df.groupby("channel", as_index=False)["tokens"].sum()
 
-    summaries = []
-    for channel_name, g in df.groupby("channel"):
-        docs_tokens = g["tokens"].tolist()  # 문서 단위 tokens 리스트
-        summaries.append(process_channel(channel_name, docs_tokens))
+    # TF-IDF + KMeans
+    df = build_clusters(df, num_clusters=5, max_features=1000)
 
-    out = pd.DataFrame(summaries).sort_values(["num_docs"], ascending=False)
+    # C-TF-IDF 키워드
+    c_tfidf_matrix, feature_names = compute_c_tfidf(df, max_features=1000)
+    top_keywords = extract_top_keywords(c_tfidf_matrix, feature_names, n_top_keywords=10)
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
+    for idx, kws in enumerate(top_keywords):
+        print(f"Cluster {idx}: {', '.join(kws)}")
 
-    print(f"모델링 완료: {OUTPUT_PATH}")
+    # LDA
+    lda_model, corpus, dictionary, grouped_tokens = train_lda(df, num_topics=5, passes=10)
+
+    # 클러스터(가상 문서) 기준 토픽 확률/대표토픽
+    topics_df = get_doc_topics(lda_model, corpus, num_topics=5)
+
+    # 최종 토픽(대표 토픽 최빈값) + 키워드 확인용
+    final_topic = topics_df["dominant_topic"].value_counts().idxmax()
+    final_keywords = [w for w, _ in lda_model.show_topic(final_topic, topn=10)]
+    print(f"\n최종 대표 토픽: Topic {final_topic}")
+    print("대표 키워드:", ", ".join(final_keywords))
+
+    # 저장
+    save_results(lda_model, num_topics=5, topics_df=topics_df)
+
+    print("모델링 완료!")
 
 
 if __name__ == "__main__":
